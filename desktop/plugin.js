@@ -137,7 +137,6 @@ function Badge({ sessionId, showName }) {
 let storage = null
 const readSnoozes = () => storage?.get('snoozes', {}) || {}
 const writeSnoozes = v => storage?.set('snoozes', v)
-const archive = (id, archived) => sdk.host.request('session.archive', { session_id: id, archived })
 
 function at9(daysAhead, weekday) {
   const d = new Date()
@@ -153,10 +152,20 @@ const SNOOZE_OPTIONS = [
   ['Next Monday, 9 AM', () => at9(0, 1)]
 ]
 
+// Snooze HIDES the session (host.setPersistedSessionHidden: fenced through the
+// REST snapshot, so it works for any session). Settle ARCHIVES it; core's
+// session.archive RPC needs the session's revision, which a window only has
+// for sessions it has opened, so an unopened one gets a clear message instead.
+const ROW_PROFILE = id => rows.get(id)?.profile || 'default'
+const setHidden = (id, hidden) => sdk.host.setPersistedSessionHidden(null, { sessionId: id, profile: ROW_PROFILE(id), hidden })
+const archive = (id, archived) => sdk.host.request('session.archive', { session_id: id, archived })
+const needsOpen = e => /revision unavailable/i.test(String(e?.message || e))
+
 async function snooze(id, title, until) {
   try {
-    await archive(id, true)
-    writeSnoozes({ ...readSnoozes(), [id]: { until, title } })
+    await setHidden(id, true)
+    writeSnoozes({ ...readSnoozes(), [id]: { until, title, mode: 'hidden', profile: ROW_PROFILE(id) } })
+    load(true)
     const when = new Date(until).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })
     sdk.host.notify({ kind: 'success', message: `Snoozed until ${when}` })
   } catch (e) {
@@ -170,20 +179,23 @@ async function settle(id) {
     const s = readSnoozes(); delete s[id]; writeSnoozes(s)
     sdk.host.notify({ kind: 'success', message: 'Settled (archived)' })
   } catch (e) {
-    sdk.host.notify({ kind: 'error', message: `Settle failed: ${e?.message || e}` })
+    sdk.host.notify({ kind: 'error', message: needsOpen(e) ? 'Hermes can only archive sessions opened in this window. Open it once, or use \u22ef \u203a Archive.' : `Settle failed: ${e?.message || e}` })
   }
 }
 
 async function wakeDue() {
   const s = readSnoozes()
   let changed = false
-  for (const [id, { until, title }] of Object.entries(s)) {
+  for (const [id, { until, title, mode, profile }] of Object.entries(s)) {
     if (until > Date.now()) continue
     try {
-      await archive(id, false)
+      if (mode === 'hidden') await sdk.host.setPersistedSessionHidden(null, { sessionId: id, profile: profile || 'default', hidden: false })
+      else await archive(id, false)
       delete s[id]; changed = true
       sdk.host.notify({ kind: 'info', message: `Back from snooze: ${title}` })
-    } catch { /* gateway not ready; retry next tick */ }
+    } catch (e) {
+      if (needsOpen(e)) { delete s[id]; changed = true; sdk.host.notify({ kind: 'info', message: `Snooze ended: ${title} (in Archived)` }) }
+    }
   }
   if (changed) writeSnoozes(s)
 }
