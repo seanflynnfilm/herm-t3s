@@ -59,7 +59,8 @@ function useData() {
 }
 
 function load(force = false) {
-  if (loading || (!force && Date.now() - loadedAt < 30_000)) return
+  if (loading) return loading
+  if (!force && Date.now() - loadedAt < 30_000) return Promise.resolve()
   const list = sdk.host?.listPersistedSessions
   loading = Promise.all([
     list ? list(null, { profile: 'all', limit: 500 }).catch(() => null) : null,
@@ -79,6 +80,7 @@ function load(force = false) {
     }
     notify()
   }).finally(() => { loading = null; loadedAt = Date.now() })
+  return loading
 }
 
 const profileName = key => names[key || 'default'] || (!key || key === 'default' ? 'Default' : key)
@@ -173,13 +175,26 @@ async function snooze(id, title, until) {
   }
 }
 
+// The archive mutation can commit on the backend yet never send its receipt
+// back (the promise just hangs), so give it a few seconds, then check the
+// persisted list (which excludes archived rows) for the real answer.
+const settled = new Set()
+const settledListeners = new Set()
 async function settle(id) {
+  let err = null
   try {
-    await archive(id, true)
+    await Promise.race([archive(id, true), new Promise(r => setTimeout(r, 5000))])
+  } catch (e) { err = e }
+  await load(true); await load(true) // second pass: an in-flight read may predate the write
+  const gone = !rows.get(id)
+  if (gone) {
     const s = readSnoozes(); delete s[id]; writeSnoozes(s)
+    settled.add(id); settledListeners.forEach(f => f())
     sdk.host.notify({ kind: 'success', message: 'Settled (archived)' })
-  } catch (e) {
-    sdk.host.notify({ kind: 'error', message: needsOpen(e) ? 'Hermes can only archive sessions opened in this window. Open it once, or use \u22ef \u203a Archive.' : `Settle failed: ${e?.message || e}` })
+  } else {
+    sdk.host.notify({ kind: 'error', message: err && needsOpen(err)
+      ? 'Hermes can only archive sessions opened in this window. Open it once, or use \u22ef \u203a Archive.'
+      : `Settle didn't take: ${err?.message || 'no change after 5s'}. Try \u22ef \u203a Archive.` })
   }
 }
 

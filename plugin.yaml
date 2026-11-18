@@ -1,5 +1,5 @@
 name: herm-t3s
-version: "0.1.1"
+version: "0.1.2"
 description: "T3 Code-style triage for the Desktop session list: a profile badge with a hover detail card, plus Snooze and Settle."
 author: Sean Flynn
 license: MIT
